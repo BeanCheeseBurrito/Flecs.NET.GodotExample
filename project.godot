@@ -18,7 +18,6 @@ config/features=PackedStringArray("4.1", "C#", "Forward Plus")
 
 window/size/viewport_width=1200
 window/size/viewport_height=720
-window/size/resizable=false
 window/vsync/vsync_mode=0
 
 [dotnet]

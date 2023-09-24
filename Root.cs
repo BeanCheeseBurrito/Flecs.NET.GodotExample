@@ -1,35 +1,35 @@
-using System.Globalization;
 using Godot;
 using Flecs.NET.Core;
 
-namespace FlecsExample;
-
-// Create world, import modules, and run the main loop.
 public partial class Root : Node2D
 {
+	[Export] public int EntityCount { get; set; } = 1000;
+	[Export] public int VelocityMin { get; set; } = 50;
+	[Export] public int VelocityMax { get; set; } = 500;
+	[Export] public int ScaleMin { get; set; } = 5;
+	[Export] public int ScaleMax { get; set; } = 15;
+
 	public World World;
 
 	public override void _Ready()
 	{
-		World = World.Create();								 // Create world.
-		World.Set(this);									 // Set root node as a singleton.
-		World.SetThreads(System.Environment.ProcessorCount); // Enable multi-threaded systems.
-		World.Import<GameComponents>();						 // Import components.
-		World.Import<GameSystems>();						 // Import systems.
+		World = World.Create();
+		World.Set<Root>(this);
+		World.Import<Components>();
+		World.Import<Systems>();
 
-		// Create entities with random values.
-		for (int i = 0; i < 3000; i++)
+		for (int i = 0; i < EntityCount; i++)
 		{
-			Vector2 position = new Vector2(GD.RandRange(0, 1000), GD.RandRange(0, 1000));
-			Vector2 velocity = new Vector2(GD.Randf(), GD.Randf()).Normalized() * GD.RandRange(50, 500);
-			Vector2 scale = Vector2.One * GD.RandRange(5, 15);
-			Color color = new Color(GD.Randf(), GD.Randf(), GD.Randf());
+			Vector2 position = new(GD.Randf() * GetViewportRect().Size.X, GD.Randf() * GetViewportRect().Size.Y);
+			Vector2 velocity = Vector2.FromAngle(GD.Randf() * 2 * Mathf.Pi) * GD.RandRange(VelocityMin, VelocityMax);
+			Vector2 scale = Vector2.One * GD.RandRange(ScaleMin, ScaleMax);
+			Color color = new(GD.Randf(), GD.Randf(), GD.Randf());
 
-			World.Entity("e" + i)
-				.SetFirst<Vector2, Position>(position)
-				.SetFirst<Vector2, Velocity>(velocity)
-				.SetFirst<Vector2, Scale>(scale)
-				.Set(color);
+			World.Entity()
+				.Set<Vector2>(Components.Position, position)
+				.Set<Vector2>(Components.Velocity, velocity)
+				.Set<Vector2>(Components.Scale, scale)
+				.Set<Color>(color);
 		}
 	}
 
@@ -39,47 +39,27 @@ public partial class Root : Node2D
 	}
 }
 
-// Class to hold reference to multi mesh.
-// Managed types are supported but shouldn't be used in performance critical systems.
-public class RenderData
+public struct Components : IFlecsModule
 {
-	public MultiMeshInstance2D MultiMeshInstance;
-	public MultiMesh MultiMesh;
-}
+	public static Entity Position;
+	public static Entity Velocity;
+	public static Entity Scale;
 
-// Tags
-public struct Position { }
-public struct Velocity { }
-public struct Scale { }
-
-public struct GameComponents : IFlecsModule
-{
 	public void InitModule(ref World world)
 	{
-		MultiMeshInstance2D multiMeshInstance = CreateMultiMeshInstance();
+		world.Module<Components>();
 
-		// Set module scope that entities and components, and systems will be registered under.
-		world.Module<GameComponents>();
+		Position = world.Entity();
+		Velocity = world.Entity();
+		Scale = world.Entity();
 
-		world.Component<RenderData>();
-		world.Component<Position>();
-		world.Component<Velocity>();
-		world.Component<Scale>();
-
-		// Set as a singleton so we can use the multi mesh in systems.
-		world.Set(new RenderData
-		{
-			MultiMeshInstance = multiMeshInstance,
-			MultiMesh = multiMeshInstance.Multimesh
-		});
-
-		// Multi mesh instance needs to be added to the scene tree.
-		world.Get<Root>().AddChild(multiMeshInstance);
+		InitMultiMeshInstance(ref world);
 	}
 
-	// Create a multi mesh so render instanced squares.
-	private static MultiMeshInstance2D CreateMultiMeshInstance()
+	private static void InitMultiMeshInstance(ref World world)
 	{
+		Root root = world.Get<Root>();
+
 		QuadMesh quad = new();
 		quad.Size = new Vector2(1, 1);
 
@@ -87,67 +67,45 @@ public struct GameComponents : IFlecsModule
 		multiMesh.TransformFormat = MultiMesh.TransformFormatEnum.Transform2D;
 		multiMesh.UseColors = true;
 		multiMesh.Mesh = quad;
+		multiMesh.InstanceCount = root.EntityCount;
+		multiMesh.VisibleInstanceCount = root.EntityCount;
 
 		MultiMeshInstance2D multiMeshInstance = new();
 		multiMeshInstance.Texture = new Texture2D();
 		multiMeshInstance.Multimesh = multiMesh;
 
-		return multiMeshInstance;
+		world.Set<MultiMeshInstance2D>(multiMeshInstance);
+		root.AddChild(multiMeshInstance);
 	}
 }
 
-public struct GameSystems : IFlecsModule
+public struct Systems : IFlecsModule
 {
 	public void InitModule(ref World world)
 	{
-		world.Import<GameComponents>();
-		world.Module<GameSystems>();
+		world.Import<Components>();
+		world.Module<Systems>();
 
 		world.Routine(
-			name: "Fps Counter",
-			routine: world.RoutineBuilder().Interval(.5f),
-			callback: (Iter _) =>
-			{
-				GD.Print(
-					Performance.GetMonitor(Performance.Monitor.TimeFps)
-						.ToString(CultureInfo.InvariantCulture)
-				);
-			}
-		);
-
-		world.Routine(
-			name: "Move",
+			name: "Update Position",
 			filter: world.FilterBuilder()
-				.With<Vector2, Position>()
-				.With<Vector2, Velocity>(),
-			routine: world.RoutineBuilder().MultiThreaded(),
-			callback: it =>
+				.With<Vector2>(Components.Position)
+				.With<Vector2>(Components.Velocity),
+			callback: (Iter it) =>
 			{
 				Column<Vector2> position = it.Field<Vector2>(1);
 				Column<Vector2> velocity = it.Field<Vector2>(2);
 
-				foreach (int i in it)
-					position[i] += velocity[i] * it.DeltaTime();
-			}
-		);
-
-		world.Routine(
-			name: "Bounce",
-			filter: world.FilterBuilder()
-				.With<Vector2, Position>()
-				.With<Vector2, Velocity>(),
-			routine: world.RoutineBuilder().MultiThreaded(),
-			callback: it =>
-			{
-				Column<Vector2> position = it.Field<Vector2>(1);
-				Column<Vector2> velocity = it.Field<Vector2>(2);
+				Rect2 screen = it.World().Get<Root>().GetViewportRect();
 
 				foreach (int i in it)
 				{
-					if (position[i].X >= 0 + 1200)
+					position[i] += velocity[i] * it.DeltaTime();
+
+					if (position[i].X >= screen.Size.X)
 						velocity[i].X = -Mathf.Abs(velocity[i].X);
 
-					if (position[i].Y >= 0 + 720)
+					if (position[i].Y >= screen.Size.Y)
 						velocity[i].Y = -Mathf.Abs(velocity[i].Y);
 
 					if (position[i].X <= 0)
@@ -160,43 +118,33 @@ public struct GameSystems : IFlecsModule
 		);
 
 		world.Routine(
-			name: "Color",
-			filter: world.FilterBuilder()
-				.With<Color>()
-				.Instanced(),
-			routine: world.RoutineBuilder().MultiThreaded(),
-			callback: it =>
+			name: "Update Colors",
+			filter: world.FilterBuilder().With<Color>(),
+			callback: (Iter it) =>
 			{
 				Column<Color> color = it.Field<Color>(1);
 
 				foreach (int i in it)
-					color[i].H += it.DeltaTime() % 1;
+					color[i].H += it.DeltaTime();
 			}
 		);
 
 		world.Routine(
-			name: "Render",
+			name: "Upload Squares",
 			filter: world.FilterBuilder()
-				.With<RenderData>().Singleton()
-				.With<Vector2, Position>()
-				.With<Vector2, Scale>()
-				.With<Color>()
-				.Instanced(),
-			routine: world.RoutineBuilder(),
-			callback: it =>
+				.With<Vector2>(Components.Position)
+				.With<Vector2>(Components.Scale)
+				.With<Color>(),
+			callback: (Iter it) =>
 			{
-				ref RenderData renderData = ref it.Field<RenderData>(1)[0];
-				ref MultiMesh multiMesh = ref renderData.MultiMesh;
+				Column<Vector2> position = it.Field<Vector2>(1);
+				Column<Vector2> scale = it.Field<Vector2>(2);
+				Column<Color> color = it.Field<Color>(3);
 
-				Column<Vector2> position = it.Field<Vector2>(2);
-				Column<Vector2> scale = it.Field<Vector2>(3);
-				Column<Color> color = it.Field<Color>(4);
+				MultiMeshInstance2D multiMeshInstance = it.World().Get<MultiMeshInstance2D>();
+				MultiMesh multiMesh = multiMeshInstance.Multimesh;
 
-				int count = it.Count();
-				multiMesh.InstanceCount = count;
-				multiMesh.VisibleInstanceCount = count;
-
-				for (int i = 0; i < count; i++)
+				foreach (int i in it)
 				{
 					multiMesh.SetInstanceTransform2D(i, new Transform2D(0, scale[i], 0, position[i]));
 					multiMesh.SetInstanceColor(i, color[i]);
